@@ -6,33 +6,12 @@
 #include <iomanip>
 #include <sstream>
 #include <vector>
-#include <random>
 #include "Launcher.h"
 
 #pragma comment(lib, "shlwapi.lib")
 
-const wchar_t* MAPPING_NAME = L"4F3E8543-40F7-4808-82DC-21E48A6037A7";
-const wchar_t* TEMP_SUBDIR_NAME = L"NV_Cache_Temp"; 
 const wchar_t* PLUGINS_SUBDIR_NAME = L"Plugins"; 
 
-struct SimpleConfig {
-    int HideQuestBanner;
-    int DisableShowDamageText;
-    int UsingTouchScreen;
-    int DisableEventCameraMove;
-    int RemoveOpenTeamProgress;
-    int RedirectCombineEntry;
-    int ResinListItemId000106Allowed;
-    int ResinListItemId000201Allowed;
-    int ResinListItemId107009Allowed;
-    int ResinListItemId107012Allowed;
-    int ResinListItemId220007Allowed;
-} g_LocalConfig = { 0 };
-
-HANDLE g_hMapFile = NULL;
-IslandEnvironment* g_pEnv = NULL;
-
-// --- 日志与辅助函数 ---
 
 std::wstring GetLogFilePath() {
     wchar_t modulePath[MAX_PATH];
@@ -59,203 +38,6 @@ void WriteLog(const std::string& message) {
 void HideConsole() {
     HWND hwnd = GetConsoleWindow();
     if (hwnd != NULL) ShowWindow(hwnd, SW_HIDE);
-}
-
-std::wstring GenerateRandomString(size_t length) {
-    const std::wstring chars = L"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    std::random_device rd;
-    std::mt19937 generator(rd());
-    std::uniform_int_distribution<size_t> distribution(0, chars.size() - 1);
-    std::wstring random_string;
-    for (size_t i = 0; i < length; ++i) {
-        random_string += chars[distribution(generator)];
-    }
-    return random_string;
-}
-
-std::wstring GetDedicatedTempPath() {
-    wchar_t sysTemp[MAX_PATH];
-    if (GetTempPathW(MAX_PATH, sysTemp) == 0) return L"";
-    
-    std::wstring dir = std::wstring(sysTemp) + TEMP_SUBDIR_NAME;
-    
-    if (GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        CreateDirectoryW(dir.c_str(), NULL);
-    }
-    return dir;
-}
-
-void CleanupOldSessions() {
-    std::wstring dir = GetDedicatedTempPath();
-    if (dir.empty()) return;
-
-    std::wstring searchPath = dir + L"\\*.dll";
-    WIN32_FIND_DATAW findData;
-    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
-
-    if (hFind == INVALID_HANDLE_VALUE) return;
-
-    int deletedCount = 0;
-    int lockedCount = 0;
-
-    do {
-        if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            std::wstring fullPath = dir + L"\\" + findData.cFileName;
-            if (DeleteFileW(fullPath.c_str())) {
-                deletedCount++;
-            } else {
-                MoveFileExW(fullPath.c_str(), NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
-                lockedCount++;
-            }
-        }
-    } while (FindNextFileW(hFind, &findData) != 0);
-
-    FindClose(hFind);
-
-    if (deletedCount > 0 || lockedCount > 0) {
-        WriteLog("清理维护: 删除了 " + std::to_string(deletedCount) + " 个旧文件, 标记了 " + std::to_string(lockedCount) + " 个锁定文件待重启删除。");
-    }
-}
-
-bool ObfuscateFileHash(const std::wstring& filePath) {
-    std::ofstream file(filePath, std::ios::binary | std::ios::app);
-    if (!file.is_open()) return false;
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(2048, 8192);
-    std::uniform_int_distribution<> byteDis(0, 255);
-
-    int appendSize = dis(gen);
-    std::vector<char> junk(appendSize);
-    for (int i = 0; i < appendSize; ++i) junk[i] = static_cast<char>(byteDis(gen));
-
-    file.write(junk.data(), appendSize);
-    file.close();
-    return true;
-}
-
-std::wstring PrepareSafeDll(const std::wstring& originalDllPath) {
-    if (GetFileAttributesW(originalDllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        WriteLog("错误: 源文件不存在 " + std::string(originalDllPath.begin(), originalDllPath.end()));
-        return L"";
-    }
-
-    std::wstring tempDir = GetDedicatedTempPath();
-    if (tempDir.empty()) {
-        WriteLog("错误: 无法创建或访问临时目录");
-        return L"";
-    }
-    
-    std::wstring randomName = GenerateRandomString(12);
-    std::wstring targetPath = tempDir + L"\\" + randomName + L".dll";
-    
-    if (!CopyFileW(originalDllPath.c_str(), targetPath.c_str(), FALSE)) {
-        WriteLog("错误: 复制DLL失败 Error=" + std::to_string(GetLastError()));
-        return L"";
-    }
-    
-    if (!ObfuscateFileHash(targetPath)) {
-        WriteLog("警告: 哈希混淆失败，但将继续使用副本");
-    }
-    
-    if (!MoveFileExW(targetPath.c_str(), NULL, MOVEFILE_DELAY_UNTIL_REBOOT)) {
-        // Ignored
-    }
-
-    WriteLog("已生成安全副本: " + std::string(targetPath.begin(), targetPath.end()));
-    return targetPath;
-}
-
-void InitOffsets(IslandEnvironment* env) {
-    if (!env) return;
-    memset(env, 0, sizeof(IslandEnvironment));
-    env->Size = sizeof(IslandEnvironment);
-
-    env->IslandFunctionOffsets.MickeyWonderMethod = 0x5e0d680;
-    env->IslandFunctionOffsets.MickeyWonderMethodPartner = 0x3e87b0;
-    env->IslandFunctionOffsets.MickeyWonderMethodPartner2 = 0x7728b90;
-    env->IslandFunctionOffsets.SetFieldOfView = 0x10407c0;
-    env->IslandFunctionOffsets.SetEnableFogRendering = 0x14f2cb90;
-    env->IslandFunctionOffsets.SetTargetFrameRate = 0x14f18ea0;
-    env->IslandFunctionOffsets.OpenTeam = 0xb8dcfa0;
-    env->IslandFunctionOffsets.OpenTeamPageAccordingly = 0xb8e5fb0;
-    env->IslandFunctionOffsets.CheckCanEnter = 0x954f230;
-    env->IslandFunctionOffsets.SetupQuestBanner = 0xdbb1320;
-    env->IslandFunctionOffsets.FindGameObject = 0x14f1bf20;
-    env->IslandFunctionOffsets.SetActive = 0x14f1bc60;
-    env->IslandFunctionOffsets.EventCameraMove = 0xe076e80;
-    env->IslandFunctionOffsets.ShowOneDamageTextEx = 0xfea2160;
-    env->IslandFunctionOffsets.SwitchInputDeviceToTouchScreen = 0xab06670;
-    env->IslandFunctionOffsets.MickeyWonderCombineEntryMethod = 0xa0a2d00;
-    env->IslandFunctionOffsets.MickeyWonderCombineEntryMethodPartner = 0x84fb720;
-    env->IslandFunctionOffsets.GetTargetFrameRate = 0x125a050;
-    env->IslandFunctionOffsets.GameManagerAwake = 0xc4007c0;
-    
-    WriteLog("内存环境初始化完成");
-}
-
-void SyncSharedMemory() {
-    if (g_hMapFile == NULL) {
-        g_hMapFile = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(IslandEnvironment), MAPPING_NAME);
-        if (g_hMapFile == NULL) {
-            WriteLog("Map创建失败: " + std::to_string(GetLastError()));
-            return;
-        }
-    }
-    
-    if (g_pEnv == NULL) {
-        g_pEnv = (IslandEnvironment*)MapViewOfFile(g_hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-        if (g_pEnv == NULL) {
-            WriteLog("View映射失败");
-            return;
-        }
-        InitOffsets(g_pEnv);
-    }
-    
-    if (g_pEnv != NULL) {
-        g_pEnv->HideQuestBanner = g_LocalConfig.HideQuestBanner;
-        g_pEnv->DisableShowDamageText = g_LocalConfig.DisableShowDamageText;
-        g_pEnv->UsingTouchScreen = g_LocalConfig.UsingTouchScreen;
-        g_pEnv->DisableEventCameraMove = g_LocalConfig.DisableEventCameraMove;
-        g_pEnv->RemoveOpenTeamProgress = g_LocalConfig.RemoveOpenTeamProgress;
-        g_pEnv->RedirectCombineEntry = g_LocalConfig.RedirectCombineEntry;
-        g_pEnv->ResinListItemId000106Allowed = g_LocalConfig.ResinListItemId000106Allowed;
-        g_pEnv->ResinListItemId000201Allowed = g_LocalConfig.ResinListItemId000201Allowed;
-        g_pEnv->ResinListItemId107009Allowed = g_LocalConfig.ResinListItemId107009Allowed;
-        g_pEnv->ResinListItemId107012Allowed = g_LocalConfig.ResinListItemId107012Allowed;
-        g_pEnv->ResinListItemId220007Allowed = g_LocalConfig.ResinListItemId220007Allowed;
-    }
-}
-
-// --- DLL 路径获取 ---
-
-std::wstring GetNvHelperPath() {
-    wchar_t modulePath[MAX_PATH];
-    if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH) == 0) return L"";
-    std::wstring moduleDir = modulePath;
-    size_t lastSlash = moduleDir.find_last_of(L"\\/");
-    if (lastSlash == std::wstring::npos) return L"";
-    return moduleDir.substr(0, lastSlash) + L"\\nvhelper.dll";
-}
-
-// 新增：获取 Genshin.UnlockerIsland.API.dll 路径
-std::wstring GetUnlockerApiDllPath() {
-    wchar_t modulePath[MAX_PATH];
-    if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH) == 0) return L"";
-    std::wstring moduleDir = modulePath;
-    size_t lastSlash = moduleDir.find_last_of(L"\\/");
-    if (lastSlash == std::wstring::npos) return L"";
-    return moduleDir.substr(0, lastSlash) + L"\\Genshin.UnlockerIsland.API.dll";
-}
-
-std::wstring GetInputHotSwitchDllPath() {
-    wchar_t modulePath[MAX_PATH];
-    if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH) == 0) return L"";
-    std::wstring moduleDir = modulePath;
-    size_t lastSlash = moduleDir.find_last_of(L"\\/");
-    if (lastSlash == std::wstring::npos) return L"";
-    return moduleDir.substr(0, lastSlash) + L"\\input_hot_switch.dll";
 }
 
 bool InjectDll(HANDLE hProcess, const std::wstring& dllPath) {
@@ -286,8 +68,6 @@ bool InjectDll(HANDLE hProcess, const std::wstring& dllPath) {
     return exitCode != 0;
 }
 
-// --- 递归插件加载逻辑 ---
-
 void RecursiveScanAndInject(HANDLE hProcess, const std::wstring& directory, int& injectedCount) {
     std::wstring searchPath = directory + L"\\*";
     WIN32_FIND_DATAW findData;
@@ -302,7 +82,6 @@ void RecursiveScanAndInject(HANDLE hProcess, const std::wstring& directory, int&
         std::wstring fullPath = directory + L"\\" + findData.cFileName;
 
         if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            // 递归进入子文件夹
             RecursiveScanAndInject(hProcess, fullPath, injectedCount);
         } else {
             size_t nameLen = wcslen(findData.cFileName);
@@ -312,9 +91,8 @@ void RecursiveScanAndInject(HANDLE hProcess, const std::wstring& directory, int&
                     std::wstring wFileName = findData.cFileName;
                     std::string sFileName(wFileName.begin(), wFileName.end());
 
-                    WriteLog("发现插件: " + sFileName + ", 直接注入(无需Temp)...");
+                    WriteLog("发现插件: " + sFileName + "，正在注入...");
 
-                    // 插件直接注入，不使用 PrepareSafeDll
                     if (InjectDll(hProcess, fullPath)) {
                         WriteLog("插件注入成功: " + sFileName);
                         injectedCount++;
@@ -340,7 +118,10 @@ void InjectPlugins(HANDLE hProcess) {
     
     std::wstring pluginsDir = moduleDir.substr(0, lastSlash) + L"\\" + PLUGINS_SUBDIR_NAME;
 
-    if (GetFileAttributesW(pluginsDir.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    if (GetFileAttributesW(pluginsDir.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        WriteLog("未找到 Plugins 目录，跳过插件加载。");
+        return;
+    }
 
     WriteLog("正在递归扫描插件目录: " + std::string(pluginsDir.begin(), pluginsDir.end()));
     
@@ -352,33 +133,10 @@ void InjectPlugins(HANDLE hProcess) {
 
 extern "C" {
     
-    LAUNCHER_API void UpdateConfig(const wchar_t* gamePath, int hideQuest, int disableDamage, int useTouch,
-        int disableEventCam, int removeTeamProgress, int redirectCombine, 
-        int resin1, int resin2, int resin3, int resin4, int resin5) 
-    {
-        g_LocalConfig.HideQuestBanner = hideQuest;
-        g_LocalConfig.DisableShowDamageText = disableDamage;
-        g_LocalConfig.UsingTouchScreen = useTouch;
-        g_LocalConfig.DisableEventCameraMove = disableEventCam;
-        g_LocalConfig.RemoveOpenTeamProgress = removeTeamProgress;
-        g_LocalConfig.RedirectCombineEntry = redirectCombine;
-        g_LocalConfig.ResinListItemId000106Allowed = resin1;
-        g_LocalConfig.ResinListItemId000201Allowed = resin2;
-        g_LocalConfig.ResinListItemId107009Allowed = resin3;
-        g_LocalConfig.ResinListItemId107012Allowed = resin4;
-        g_LocalConfig.ResinListItemId220007Allowed = resin5;
-
-        SyncSharedMemory();
-    }
-
     LAUNCHER_API int LaunchGameAndInject(const wchar_t* gamePath, const wchar_t* dllPath, const wchar_t* commandLineArgs, wchar_t* errorMessage, int errorMessageSize) {
         WriteLog("=== 启动会话开始 ===");
         HideConsole();
         
-        CleanupOldSessions();
-        
-        SyncSharedMemory();
-
         if (!ValidateGamePath(gamePath)) {
             if (errorMessage) wcsncpy_s(errorMessage, errorMessageSize, L"游戏路径无效", _TRUNCATE);
             WriteLog("错误: 游戏路径无效");
@@ -404,86 +162,8 @@ extern "C" {
             if (pCmdLine) delete[] pCmdLine;
             return 3;
         }
-
-        bool injectionSuccess = true;
-
-        // 1. 注入 NvHelper
-        std::wstring nvPath = GetNvHelperPath();
-        if (!nvPath.empty() && PathFileExistsW(nvPath.c_str())) {
-            WriteLog("注入 NvHelper...");
-            if (!InjectDll(pi.hProcess, nvPath)) {
-                WriteLog("警告: NvHelper 注入失败");
-            }
-        }
-
-        // 2. 注入外部传入的 DLL (如果有)
-        if (dllPath && wcslen(dllPath) > 0) {
-            WriteLog("准备注入外部指定的DLL...");
-            std::wstring safeDllPath = PrepareSafeDll(dllPath);
-            if (safeDllPath.empty()) {
-                WriteLog("致命错误: 外部DLL安全处理失败");
-                injectionSuccess = false;
-                if (errorMessage) wcsncpy_s(errorMessage, errorMessageSize, L"DLL处理失败", _TRUNCATE);
-            } else {
-                if (!InjectDll(pi.hProcess, safeDllPath)) {
-                    WriteLog("错误: 外部DLL注入失败");
-                    injectionSuccess = false;
-                    if (errorMessage) wcsncpy_s(errorMessage, errorMessageSize, L"DLL注入失败", _TRUNCATE);
-                } else {
-                    WriteLog("外部DLL注入成功");
-                }
-            }
-        }
-
-        // 3. 注入 Genshin.UnlockerIsland.API.dll (核心组件 - 必须保留)
-        if (injectionSuccess) {
-            std::wstring unlockerApiPath = GetUnlockerApiDllPath();
-            if (!unlockerApiPath.empty() && PathFileExistsW(unlockerApiPath.c_str())) {
-                WriteLog("发现核心组件: Genshin.UnlockerIsland.API.dll");
-                // 核心DLL为了稳定性，建议保留安全副本(Temp)机制，如需直接注入可替换为 InjectDll(pi.hProcess, unlockerApiPath)
-                std::wstring safeApiPath = PrepareSafeDll(unlockerApiPath);
-                if (!safeApiPath.empty()) {
-                    if (InjectDll(pi.hProcess, safeApiPath)) {
-                        WriteLog("Genshin.UnlockerIsland.API.dll 注入成功");
-                    } else {
-                        WriteLog("警告: Genshin.UnlockerIsland.API.dll 注入失败");
-                    }
-                } else {
-                     WriteLog("警告: Genshin.UnlockerIsland.API.dll 安全处理失败");
-                }
-            } else {
-                WriteLog("注意: 未找到 Genshin.UnlockerIsland.API.dll，可能通过其他方式加载");
-            }
-        }
-
-        // 4. 注入 InputHotSwitch
-        if (injectionSuccess) {
-            std::wstring inputHotSwitchPath = GetInputHotSwitchDllPath();
-            if (!inputHotSwitchPath.empty() && PathFileExistsW(inputHotSwitchPath.c_str())) {
-                WriteLog("准备注入 InputHotSwitch...");
-                std::wstring safeInputSwitchPath = PrepareSafeDll(inputHotSwitchPath);
-                if (!safeInputSwitchPath.empty()) {
-                    if (InjectDll(pi.hProcess, safeInputSwitchPath)) {
-                        WriteLog("InputHotSwitch 注入成功");
-                    } else {
-                        WriteLog("警告: InputHotSwitch 注入失败");
-                    }
-                }
-            }
-        }
-
-        // 5. 递归注入 Plugins (直接注入)
-        if (injectionSuccess) {
-            InjectPlugins(pi.hProcess);
-        }
         
-        if (!injectionSuccess) {
-            TerminateProcess(pi.hProcess, 1);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            if (pCmdLine) delete[] pCmdLine;
-            return 4;
-        }
+        InjectPlugins(pi.hProcess);
         
         ResumeThread(pi.hThread);
         CloseHandle(pi.hThread);
@@ -495,11 +175,9 @@ extern "C" {
     }
 
     LAUNCHER_API int GetDefaultDllPath(wchar_t* dllPath, int dllPathSize) {
-        wchar_t modulePath[MAX_PATH];
-        GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
-        std::wstring path = modulePath;
-        path = path.substr(0, path.find_last_of(L"\\/")) + L"\\nvhelper.dll";
-        if (dllPath) wcsncpy_s(dllPath, dllPathSize, path.c_str(), _TRUNCATE);
+        if (dllPath && dllPathSize > 0) {
+            dllPath[0] = L'\0';
+        }
         return 0;
     }
 
