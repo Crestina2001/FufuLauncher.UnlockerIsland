@@ -24,6 +24,7 @@
 #include <sstream>
 #include <winsock2.h>
 #include <wincodec.h>
+#include <dxgi1_2.h>
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -200,10 +201,12 @@ typedef void* (WINAPI *tPlayerPerspective)(void*, float, void*);
 typedef int32_t (WINAPI *tSetSyncCount)(bool);
 typedef __int64 (WINAPI *tGameUpdate)(__int64, const char*);
 typedef HRESULT(__stdcall* tPresent)(IDXGISwapChain*, UINT, UINT);
+typedef HRESULT(__stdcall* tResizeBuffers)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 typedef BOOL (WINAPI* tQueryPerformanceCounter)(LARGE_INTEGER*);
 typedef ULONGLONG (WINAPI* tGetTickCount64)();
 typedef int (WSAAPI* tSend)(SOCKET s, const char* buf, int len, int flags);
 typedef int (WSAAPI* tSendTo)(SOCKET s, const char* buf, int len, int flags, const struct sockaddr* to, int tolen);
+typedef HRESULT(__stdcall* tPresent1)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters);
 
 namespace {
     std::atomic<void*> o_GetFrameCount{ nullptr };
@@ -246,6 +249,8 @@ namespace {
     LARGE_INTEGER g_LastRealTimeQPC = { 0 };
     std::atomic<void*> o_send{ nullptr };
     std::atomic<void*> o_sendto{ nullptr };
+    tResizeBuffers o_ResizeBuffers = nullptr;
+    tPresent1 o_Present1 = nullptr;
 }
 
 
@@ -312,6 +317,37 @@ struct SafeFogBuffer {
     __declspec(align(16)) uint8_t data[64];
     uint8_t padding[192];
 };
+
+HRESULT __stdcall hk_Present1_Detect(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
+    static bool s_Warned = false;
+    if (!s_Warned) {
+        s_Warned = true;
+        MessageBoxA(NULL, 
+                    "检测到你已开启 NVIDIA AI插帧\n\n"
+                    "此功能与辅助菜单冲突，会导致黑屏或无法显示画面\n"
+                    "请进入NVIDIA设置关闭 [AI插帧] 选项即可恢复正常", 
+                    "警告", MB_ICONWARNING | MB_OK | MB_TOPMOST);
+    }
+    
+    return o_Present1(pSwapChain, SyncInterval, PresentFlags, pPresentParameters);
+}
+
+HRESULT __stdcall hk_ResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags) {
+    if (g_mainRenderTargetView) {
+        g_pd3dContext->OMSetRenderTargets(0, 0, 0);
+        g_mainRenderTargetView->Release();
+        g_mainRenderTargetView = nullptr;
+    }
+    
+    HRESULT hr = o_ResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+    
+    if (g_hGameWindow_ImGui) {
+        RECT rect;
+        GetClientRect(g_hGameWindow_ImGui, &rect);
+    }
+
+    return hr;
+}
 
 static SafeFogBuffer g_fogBuf = { 0 };
 
@@ -558,6 +594,15 @@ HRESULT __stdcall hk_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT
         }
     }
 
+    if (g_mainRenderTargetView == nullptr && g_pd3dDevice != nullptr) {
+        ID3D11Texture2D* pBackBuffer = nullptr;
+        pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
+        if (pBackBuffer) {
+            g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView);
+            pBackBuffer->Release();
+        }
+    }
+    
     if (g_mainRenderTargetView) {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -867,12 +912,27 @@ bool InitDX11Hook() {
     
     void** vTable = *reinterpret_cast<void***>(swapChain);
     void* presentAddr = vTable[8];
+    void* resizeAddr = vTable[13];
+    void* present1Addr = vTable[22];
 
     std::cout << "[DX11] Found Present at: " << presentAddr << std::endl;
     if (MH_CreateHook(presentAddr, (void*)hk_Present, (void**)&o_Present) != MH_OK) {
         std::cout << "[DX11] Hook Failed!" << std::endl;
     } else {
         std::cout << "[DX11] Hook Ready." << std::endl;
+    }
+
+    std::cout << "[DX11] Found ResizeBuffers at: " << resizeAddr << std::endl;
+    if (MH_CreateHook(resizeAddr, (void*)hk_ResizeBuffers, (void**)&o_ResizeBuffers) != MH_OK) {
+        std::cout << "[DX11] Hook ResizeBuffers Failed!" << std::endl;
+    } else {
+        std::cout << "[DX11] Hook ResizeBuffers Ready." << std::endl;
+    }
+
+    if (MH_CreateHook(present1Addr, (void*)hk_Present1_Detect, (void**)&o_Present1) != MH_OK) {
+        std::cout << "[DX11] Hook Present1 Failed" << std::endl;
+    } else {
+        std::cout << "[DX11] Hook Present1 Ready." << std::endl;
     }
 
     swapChain->Release();

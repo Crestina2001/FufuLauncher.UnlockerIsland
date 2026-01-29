@@ -196,7 +196,6 @@ void MainWorker(HMODULE hMod) {
                 Beep(300, 500); 
                 std::cout << "[Network] >>> STATUS: DISCONNECTED (Blocking)" << std::endl;
             } else {
-                // 连网提示音：高音，短促清脆 (1000Hz, 200ms)
                 Beep(1000, 200); 
                 std::cout << "[Network] >>> STATUS: CONNECTED (Normal)" << std::endl;
             }
