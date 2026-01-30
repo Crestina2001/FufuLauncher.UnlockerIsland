@@ -78,6 +78,8 @@ struct ModConfig {
     int network_toggle_key = VK_F11;
 
     bool is_currently_blocking = false;
+
+    bool enable_fov_limit_check = true;
 };
 
 namespace Config {

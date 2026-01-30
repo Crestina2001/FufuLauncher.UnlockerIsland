@@ -139,9 +139,9 @@ void MainWorker(HMODULE hMod) {
     if (Config::Get().debug_console) {
         OpenConsole("Unlocker Heartbeat System");
     }
-
+    
     std::cout << Config::Get().hide_quest_banner << std::endl;
-
+    
     std::cout << "[*] Initializing local security..." << std::endl;
     PerformSecurityCheck();
     

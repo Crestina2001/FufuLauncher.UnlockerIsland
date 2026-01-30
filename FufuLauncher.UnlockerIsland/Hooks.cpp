@@ -177,7 +177,6 @@ namespace EncryptedPatterns {
     // 3. FPS 3
     constexpr auto HSR_FPS_3 = XorString::encrypt("75 05 E8 ? ? ? ? C7 05 ? ? ? ? 03 00 00 00 48 83 C4 28 C3");
 }
-
 namespace EncryptedStrings {
     constexpr auto SynthesisPage = XorString::encrypt("SynthesisPage");
     constexpr auto QuestBannerPath = XorString::encrypt("Canvas/Pages/InLevelMapPage/GrpMap/GrpPointTips/Layout/QuestBanner");
@@ -1006,17 +1005,9 @@ __int64 WINAPI hk_GameUpdate(__int64 a1, const char* a2) {
 
 int32_t WINAPI hk_ChangeFov(void* __this, float value) {
     if (!g_GameUpdateInit.load()) g_GameUpdateInit.store(true);
+    
     auto& cfg = Config::Get();
     
-    static ULONGLONG lastQPressTime = 0;
-    ULONGLONG currentTime = GetTickCount64();
-    
-    if ((GetAsyncKeyState(0x51) & 0x8000) && (currentTime - lastQPressTime >= 4000)) {
-        lastQPressTime = currentTime;
-    }
-    
-    bool isWithinQGracePeriod = (currentTime - lastQPressTime < 4000); 
-
     if (g_RequestCraft.load()) {
         g_RequestCraft.store(false);
         DoCraftLogic();
@@ -1033,13 +1024,15 @@ int32_t WINAPI hk_ChangeFov(void* __this, float value) {
             if (IsValid(sw)) SafeInvoke([&]() { sw(nullptr); });
         }
     });
-
+    
     if (cfg.enable_fps_override) {
         auto setFps = (tSetFrameCount)o_SetFrameCount.load();
         if (IsValid(setFps)) SafeInvoke([&]() { setFps(cfg.selected_fps); });
     }
     
-    if (value > 30.0f && cfg.enable_fov_override && !isWithinQGracePeriod) {
+    bool pass_check = !cfg.enable_fov_limit_check || (value > 30.0f);
+
+    if (pass_check && cfg.enable_fov_override) {
         value = cfg.fov_value;
     }
 
