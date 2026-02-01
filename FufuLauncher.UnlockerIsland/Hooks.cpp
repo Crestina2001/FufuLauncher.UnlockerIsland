@@ -25,6 +25,7 @@
 #include <winsock2.h>
 #include <wincodec.h>
 #include <dxgi1_2.h>
+#include <map>
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -190,6 +191,8 @@ namespace EncryptedPatterns {
     constexpr auto GetTransformOffset = XorString::encrypt("15B83580");
     // UnityEngine.Transform.INTERNAL_set_position
     constexpr auto SetPosOffset = XorString::encrypt("15B7CC70");
+    // UnityEngine.Camera.get_c2w
+    constexpr auto CameraGetC2WOffset = XorString::encrypt("15B722D0");
 }
 namespace EncryptedStrings {
     constexpr auto SynthesisPage = XorString::encrypt("SynthesisPage");
@@ -222,7 +225,7 @@ typedef HRESULT(__stdcall* tResizeBuffers)(IDXGISwapChain*, UINT, UINT, UINT, DX
 typedef BOOL (WINAPI* tQueryPerformanceCounter)(LARGE_INTEGER*);
 typedef ULONGLONG (WINAPI* tGetTickCount64)();
 typedef int (WSAAPI* tSend)(SOCKET s, const char* buf, int len, int flags);
-typedef int (WSAAPI* tSendTo)(SOCKET s, const char* buf, int len, int flags, const struct sockaddr* to, int tolen);
+typedef int (WSAAPI* tSendTo)(SOCKET s, const char* buf, int len, int flags, const sockaddr* to, int tolen);
 typedef HRESULT(__stdcall* tPresent1)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters);
 typedef bool (WINAPI *tGetActive)(void*);
 std::atomic<void*> p_GetActive{ nullptr };
@@ -231,6 +234,12 @@ typedef void* (WINAPI *tGetGlobalActor)(void*);
 typedef void (WINAPI *tAvatarPaimonAppear)(void*, void*, bool);
 typedef void (WINAPI *tVoidFunc)(void*);
 struct Vector3 { float x, y, z; };
+
+struct __declspec(align(16)) Matrix4x4 {
+    float m[4][4];
+};
+
+typedef void (*tCamera_GetC2W)(Matrix4x4* out_result, void* _this, void* method_info);
 
 const float FC_BASE_SPEED = 0.015f;
 const float FC_SHIFT_MULTIPLIER = 4.0f;
@@ -242,14 +251,22 @@ namespace FreeCamState {
     volatile float camX = 0.0f, camY = 0.0f, camZ = 0.0f;
     volatile float velX = 0.0f, velY = 0.0f, velZ = 0.0f;
     float targetVelX = 0.0f, targetVelY = 0.0f, targetVelZ = 0.0f;
-    
     void* mainCameraTransform = nullptr;
     bool isActive = false;
+    bool isObjectSelectionMode = false;
+    void* currentTargetTransform = nullptr;
+    std::vector<void*> capturedTransforms;
+    std::mutex transformMutex;
+    int selectionIndex = -1;
+    std::map<void*, ULONGLONG> activeTransformsMap;
+    std::vector<void*> stableList;
 }
 
 typedef void(__fastcall* tSetPos)(void* pTransform, Vector3* pPos);
 typedef void* (__fastcall* tGetMainCamera)();
 typedef void* (__fastcall* tGetTransform)(void* pComponent);
+
+bool g_ShowCoordWindow = false;
 
 namespace {
     std::atomic<void*> o_GetFrameCount{ nullptr };
@@ -391,6 +408,97 @@ struct SafeFogBuffer {
 
 void UpdateFreeCamPhysics() {
     auto& cfg = Config::Get();
+    ULONGLONG currentTick = GetTickCount64();
+    
+    static ULONGLONG f6PressStart = 0;
+    static bool f6Handled = false;
+    
+    if (GetAsyncKeyState(VK_F6) & 0x8000) {
+        if (f6PressStart == 0) {
+            f6PressStart = currentTick;
+            f6Handled = false;
+        } else if (!f6Handled && currentTick - f6PressStart >= 3000) {
+            
+            bool newState = !g_ShowCoordWindow;
+            
+            g_ShowCoordWindow = newState;
+            FreeCamState::isObjectSelectionMode = newState;
+            
+            if (!newState) {
+                FreeCamState::currentTargetTransform = nullptr;
+                {
+                    std::lock_guard lock(FreeCamState::transformMutex);
+                    FreeCamState::activeTransformsMap.clear();
+                    FreeCamState::stableList.clear();
+                }
+            }
+
+            f6Handled = true;
+            std::cout << "[System] Debug Mode & Window: " << (newState ? "ON" : "OFF") << std::endl;
+        }
+    } else {
+        f6PressStart = 0;
+        f6Handled = false;
+    }
+    
+    if (FreeCamState::isObjectSelectionMode) {
+        std::lock_guard lock(FreeCamState::transformMutex);
+        
+        for (auto it = FreeCamState::activeTransformsMap.begin(); it != FreeCamState::activeTransformsMap.end(); ) {
+            if (currentTick - it->second > 1000) {
+                it = FreeCamState::activeTransformsMap.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        
+        FreeCamState::stableList.clear();
+        for (auto const& [ptr, time] : FreeCamState::activeTransformsMap) {
+            FreeCamState::stableList.push_back(ptr);
+        }
+        
+        static ULONGLONG lastSwitchTick = 0;
+        if (currentTick - lastSwitchTick > 200) {
+            bool pressPrev = GetAsyncKeyState(VK_DIVIDE) & 0x8000;
+            bool pressNext = GetAsyncKeyState(VK_MULTIPLY) & 0x8000;
+
+            if (pressPrev || pressNext) {
+                lastSwitchTick = currentTick;
+                
+                int currentIndex = -1;
+                if (FreeCamState::currentTargetTransform != nullptr) {
+                    for (int i = 0; i < FreeCamState::stableList.size(); ++i) {
+                        if (FreeCamState::stableList[i] == FreeCamState::currentTargetTransform) {
+                            currentIndex = i;
+                            break;
+                        }
+                    }
+                }
+
+                int total = (int)FreeCamState::stableList.size();
+                int nextIndex = currentIndex;
+
+                if (pressPrev) {
+                    nextIndex--;
+                    if (nextIndex < -1) nextIndex = total - 1;
+                } 
+                else if (pressNext) {
+                    nextIndex++;
+                    if (nextIndex >= total) nextIndex = -1;
+                }
+
+                if (nextIndex == -1 || total == 0) {
+                    FreeCamState::currentTargetTransform = nullptr;
+                    std::cout << "[FreeCam] Selected: Main Camera (Total Objects: " << total << ")" << std::endl;
+                } else {
+                    FreeCamState::currentTargetTransform = FreeCamState::stableList[nextIndex];
+                    std::cout << "[FreeCam] Selected Object " << (nextIndex + 1) << "/" << total 
+                              << " (Ptr: " << FreeCamState::currentTargetTransform << ")" << std::endl;
+                    FreeCamState::velX = FreeCamState::velY = FreeCamState::velZ = 0.0f;
+                }
+            }
+        }
+    }
     
     static bool lastToggleKey = false;
     bool currToggleKey = GetAsyncKeyState(cfg.free_cam_key) & 0x8000;
@@ -405,37 +513,89 @@ void UpdateFreeCamPhysics() {
     }
 
     if (!FreeCamState::isActive) return;
-
+    
+    float forwardX = 0, forwardY = 0, forwardZ = 1;
+    float rightX = 1, rightY = 0, rightZ = 0;
+    bool gotMatrix = false;
+    
+    static tCamera_GetC2W call_Camera_GetC2W = nullptr;
+    static bool isAddrInitialized = false;
+    
+    if (!isAddrInitialized) {
+        uintptr_t base = (uintptr_t)GetModuleHandle(NULL);
+        if (base) {
+            std::string offsetStr = XorString::decrypt(EncryptedPatterns::CameraGetC2WOffset);
+            uintptr_t offsetVal = 0;
+            std::stringstream ss;
+            ss << std::hex << offsetStr;
+            ss >> offsetVal;
+            call_Camera_GetC2W = (tCamera_GetC2W)(base + offsetVal);
+        }
+        isAddrInitialized = true;
+    }
+    
+    if (call_GetMainCamera && call_Camera_GetC2W) {
+        void* pCamera = call_GetMainCamera(); 
+        if (pCamera) {
+            Matrix4x4 mat;
+            call_Camera_GetC2W(&mat, pCamera, nullptr);
+            rightX = mat.m[0][0]; rightY = mat.m[1][0]; rightZ = mat.m[2][0];
+            forwardX = -mat.m[0][2]; forwardY = -mat.m[1][2]; forwardZ = -mat.m[2][2];
+            gotMatrix = true;
+        }
+    }
+    
     float currentPower = FC_BASE_SPEED;
     if (GetAsyncKeyState(VK_SHIFT) & 0x8000)   currentPower *= FC_SHIFT_MULTIPLIER;
     if (GetAsyncKeyState(VK_CONTROL) & 0x8000) currentPower *= FC_CTRL_MULTIPLIER;
     
-    float targetVelX = 0.0f;
-    float targetVelY = 0.0f;
-    float targetVelZ = 0.0f;
+    float inputForward = 0.0f;
+    float inputRight = 0.0f;
+    float inputUp = 0.0f;
 
-    if (GetAsyncKeyState(VK_UP) & 0x8000)       targetVelZ += currentPower;
-    if (GetAsyncKeyState(VK_DOWN) & 0x8000)     targetVelZ -= currentPower;
-    if (GetAsyncKeyState(VK_LEFT) & 0x8000)     targetVelX -= currentPower;
-    if (GetAsyncKeyState(VK_RIGHT) & 0x8000)    targetVelX += currentPower;
-    if (GetAsyncKeyState(VK_ADD) & 0x8000)      targetVelY += currentPower; //Num+
-    if (GetAsyncKeyState(VK_SUBTRACT) & 0x8000) targetVelY -= currentPower; //Num-
+    if (GetAsyncKeyState(VK_UP) & 0x8000)      inputForward += 1.0f;
+    if (GetAsyncKeyState(VK_DOWN) & 0x8000)    inputForward -= 1.0f;
+    if (GetAsyncKeyState(VK_LEFT) & 0x8000)    inputRight -= 1.0f;
+    if (GetAsyncKeyState(VK_RIGHT) & 0x8000)   inputRight += 1.0f;
+    if (GetAsyncKeyState(VK_SPACE) & 0x8000)   inputUp += 1.0f;
+    if (GetAsyncKeyState(VK_ADD) & 0x8000)     inputUp += 1.0f;
+    if (GetAsyncKeyState(VK_SUBTRACT) & 0x8000) inputUp -= 1.0f;
+
+    float targetVelX = 0.0f, targetVelY = 0.0f, targetVelZ = 0.0f;
     
-    //Velocity = Velocity + (Target - Velocity) * Acceleration
+    if (gotMatrix) {
+        targetVelX += forwardX * inputForward;
+        targetVelY += forwardY * inputForward;
+        targetVelZ += forwardZ * inputForward;
+        
+        targetVelX += rightX * inputRight;
+        targetVelY += rightY * inputRight;
+        targetVelZ += rightZ * inputRight;
+        
+        targetVelY += inputUp;
+    } else {
+        targetVelZ += inputForward;
+        targetVelX += inputRight;
+        targetVelY += inputUp;
+    }
+    
+    targetVelX *= currentPower;
+    targetVelY *= currentPower;
+    targetVelZ *= currentPower;
+    
     FreeCamState::velX += (targetVelX - FreeCamState::velX) * FC_ACCELERATION;
     FreeCamState::velY += (targetVelY - FreeCamState::velY) * FC_ACCELERATION;
     FreeCamState::velZ += (targetVelZ - FreeCamState::velZ) * FC_ACCELERATION;
     
-    if (targetVelX == 0.0f && targetVelY == 0.0f && targetVelZ == 0.0f) {
+    if (abs(inputForward) < 0.1f && abs(inputRight) < 0.1f && abs(inputUp) < 0.1f) {
         FreeCamState::velX *= FC_FRICTION;
         FreeCamState::velY *= FC_FRICTION;
         FreeCamState::velZ *= FC_FRICTION;
-        
-        if (abs(FreeCamState::velX) < 0.0001f) FreeCamState::velX = 0.0f;
-        if (abs(FreeCamState::velY) < 0.0001f) FreeCamState::velY = 0.0f;
-        if (abs(FreeCamState::velZ) < 0.0001f) FreeCamState::velZ = 0.0f;
+        if (abs(FreeCamState::velX) < 0.001f) FreeCamState::velX = 0.0f;
+        if (abs(FreeCamState::velY) < 0.001f) FreeCamState::velY = 0.0f;
+        if (abs(FreeCamState::velZ) < 0.001f) FreeCamState::velZ = 0.0f;
     }
-
+    
     FreeCamState::camX += FreeCamState::velX;
     FreeCamState::camY += FreeCamState::velY;
     FreeCamState::camZ += FreeCamState::velZ;
@@ -459,7 +619,28 @@ void __fastcall hk_SetPos(void* pTransform, Vector3* pPos) {
         }
     }
     
-    if (pTransform == FreeCamState::mainCameraTransform) {
+    if (FreeCamState::isObjectSelectionMode) {
+        std::lock_guard lock(FreeCamState::transformMutex);
+        FreeCamState::activeTransformsMap[pTransform] = GetTickCount64();
+    }
+    
+    void* targetTransform = FreeCamState::mainCameraTransform;
+
+    if (FreeCamState::isObjectSelectionMode && FreeCamState::currentTargetTransform != nullptr) {
+        targetTransform = FreeCamState::currentTargetTransform;
+    }
+    
+    if (pTransform == targetTransform) {
+        
+        static void* lastControlledTarget = nullptr;
+        
+        if (targetTransform != lastControlledTarget) {
+            FreeCamState::camX = pPos->x;
+            FreeCamState::camY = pPos->y;
+            FreeCamState::camZ = pPos->z;
+            lastControlledTarget = targetTransform;
+        }
+
         if (!FreeCamState::isActive) {
             FreeCamState::camX = pPos->x;
             FreeCamState::camY = pPos->y;
@@ -950,6 +1131,43 @@ HRESULT __stdcall hk_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT
         }
 
         ImGui::NewFrame();
+        
+        if (g_ShowCoordWindow) {
+            ImGui::SetNextWindowSize(ImVec2(320, 180), ImGuiCond_FirstUseEver);
+        
+            if (ImGui::Begin("Object Debugger", &g_ShowCoordWindow)) {
+                void* currentObj = FreeCamState::currentTargetTransform 
+                                   ? FreeCamState::currentTargetTransform 
+                                   : FreeCamState::mainCameraTransform;
+
+                ImGui::TextColored(ImVec4(0, 1, 0, 1), "Target Base Address:");
+                ImGui::SameLine();
+                ImGui::Text("0x%p", currentObj);
+            
+                ImGui::Separator();
+                
+                float pos[3] = { FreeCamState::camX, FreeCamState::camY, FreeCamState::camZ };
+            
+                ImGui::Text("Current Coordinates:");
+                if (ImGui::InputFloat3("##Coords", pos)) {
+                    FreeCamState::camX = pos[0];
+                    FreeCamState::camY = pos[1];
+                    FreeCamState::camZ = pos[2];
+                    
+                    FreeCamState::velX = 0; 
+                    FreeCamState::velY = 0; 
+                    FreeCamState::velZ = 0;
+                }
+                
+                if (ImGui::Button("Copy to Clipboard")) {
+                    char buf[128];
+                    sprintf_s(buf, "X:%.2f Y:%.2f Z:%.2f", pos[0], pos[1], pos[2]);
+                    ImGui::SetClipboardText(buf);
+                }
+            
+                ImGui::End();
+            }
+        }
         
         {
             ImGuiIO& io = ImGui::GetIO();

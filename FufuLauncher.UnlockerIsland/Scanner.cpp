@@ -7,7 +7,6 @@
 
 #include "Config.h"
 
-
 namespace Scanner {
 
     std::vector<int> ParsePattern(const std::string& signature) {
@@ -23,7 +22,7 @@ namespace Scanner {
         }
         return pattern;
     }
-    
+
     void* ScanMainMod(const std::string& signature) {
         HMODULE hModule = nullptr;
         
@@ -49,42 +48,52 @@ namespace Scanner {
         uintptr_t endAddr = startAddr + modInfo.SizeOfImage;
         uintptr_t current = startAddr;
 
+        const size_t pSize = pattern.size();
+
         while (current < endAddr) {
             MEMORY_BASIC_INFORMATION mbi;
             if (!VirtualQuery((LPCVOID)current, &mbi, sizeof(mbi))) {
                 break;
             }
-
-            bool isGood = (mbi.State == MEM_COMMIT) && 
-                          ((mbi.Protect & PAGE_EXECUTE_READ) || 
-                           (mbi.Protect & PAGE_EXECUTE_READWRITE) || 
-                           (mbi.Protect & PAGE_READWRITE) || 
+            
+            bool isGood = (mbi.State == MEM_COMMIT) &&
+                          ((mbi.Protect & PAGE_GUARD) == 0) &&
+                          ((mbi.Protect & PAGE_EXECUTE_READ) ||
+                           (mbi.Protect & PAGE_EXECUTE_READWRITE) ||
+                           (mbi.Protect & PAGE_READWRITE) ||
                            (mbi.Protect & PAGE_READONLY));
 
             if (isGood) {
                 size_t regionSize = mbi.RegionSize;
+                
                 if ((uintptr_t)mbi.BaseAddress + regionSize > endAddr) {
                     regionSize = endAddr - (uintptr_t)mbi.BaseAddress;
                 }
-                
-                const uint8_t* pStart = (const uint8_t*)mbi.BaseAddress;
-                const size_t pSize = pattern.size();
-                
-                for (size_t i = 0; i <= regionSize - pSize; ++i) {
-                    bool found = true;
-                    for (size_t j = 0; j < pSize; ++j) {
-                        if (pattern[j] != -1 && pattern[j] != pStart[i + j]) {
-                            found = false;
-                            break;
+
+                if (regionSize >= pSize) {
+                    const uint8_t* pStart = (const uint8_t*)mbi.BaseAddress;
+                    
+                    for (size_t i = 0; i <= regionSize - pSize; ++i) {
+                        bool found = true;
+                        for (size_t j = 0; j < pSize; ++j) {
+                            if (pattern[j] != -1 && pattern[j] != pStart[i + j]) {
+                                found = false;
+                                break;
+                            }
                         }
-                    }
-                    if (found) {
-                        return (void*)(pStart + i);
+                        if (found) {
+                            return (void*)(pStart + i);
+                        }
                     }
                 }
             }
             
-            current = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+            uintptr_t nextAddr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+            
+            if (nextAddr <= current) {
+                break;
+            }
+            current = nextAddr;
         }
 
         return nullptr;
