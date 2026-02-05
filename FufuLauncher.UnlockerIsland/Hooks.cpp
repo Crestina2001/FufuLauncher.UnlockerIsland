@@ -1857,14 +1857,19 @@ bool Hooks::Init() {
             call_GetMainCamera = (tGetMainCamera)addr_GetMain;
             call_GetTransform = (tGetTransform)addr_GetTrans;
 
-            if (addr_SetPos) {
-                if (MH_CreateHook((void*)addr_SetPos, (void*)hk_SetPos, (void**)&o_SetPos) == MH_OK) {
-                    std::cout << "   -> FreeCam SetPos Hook Ready." << std::endl;
+            if (Config::Get().enable_free_cam) {
+                std::cout << "[Camera] Initializing Free Camera Hooks..." << std::endl;
+            
+                if (addr_SetPos) {
+                    if (MH_CreateHook((void*)addr_SetPos, (void*)hk_SetPos, (void**)&o_SetPos) == MH_OK) {
+                        std::cout << "   -> FreeCam SetPos Hook Ready." << std::endl;
+                        MH_EnableHook((void*)addr_SetPos); 
+                    } else {
+                        std::cout << "   -> [ERR] FreeCam SetPos Hook Failed." << std::endl;
+                    }
                 } else {
-                    std::cout << "   -> [ERR] FreeCam SetPos Hook Failed." << std::endl;
+                    std::cout << "   -> [ERR] FreeCam Address Invalid." << std::endl;
                 }
-            } else {
-                std::cout << "   -> [ERR] FreeCam Address Invalid." << std::endl;
             }
         }
     }
