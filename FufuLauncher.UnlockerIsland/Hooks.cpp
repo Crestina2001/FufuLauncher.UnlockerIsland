@@ -911,7 +911,7 @@ bool CheckResistInBeyd() {
     auto _GetComponent = (tGetComponent)(base + getComponentOffsetVal);
 
     if (!_FindString || !_FindGameObject || !_GetText || !_GetComponent) {
-        return;
+        return true;
     }
 
     Il2CppString* uidStrObj = _FindString(XorString::decrypt(EncryptedStrings::UIDPathWatermark).c_str());
